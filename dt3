@@ -1,0 +1,182 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+from sklearn.metrics import mean_squared_error
+class AlphaBetaFilter:
+def __init__(self, alpha=0.5, beta=0.02):
+self.alpha = alpha
+self.beta = beta
+self.x_pred = None
+self.v_pred = None
+self.dt = 1.0
+def initialize(self, x0, v0=0):
+self.x_pred = x0
+self.v_pred = v0
+def update(self, z):
+x_pred_step = self.x_pred + self.v_pred * self.dt
+residual = z - x_pred_step
+x_est = x_pred_step + self.alpha * residual
+v_est = self.v_pred + (self.beta / self.dt) * residual
+self.x_pred, self.v_pred = x_est, v_est
+return x_est, v_est
+def filter(self, measurements):
+n = len(measurements)
+filtered = np.zeros(n)
+self.initialize(measurements[0], 0)
+for i in range(n):
+filtered[i], _ = self.update(measurements[i])
+return filtered
+class AlphaBetaGammaFilter:
+def __init__(self, alpha=0.5, beta=0.02, gamma=0.001):
+self.alpha = alpha
+self.beta = beta
+self.gamma = gamma
+self.x_pred = None
+self.v_pred = None
+self.a_pred = None
+self.dt = 1.0
+def initialize(self, x0, v0=0, a0=0):
+self.x_pred = x0
+self.v_pred = v0
+self.a_pred = a0
+def update(self, z):
+x_pred_step = self.x_pred + self.v_pred * self.dt + 0.5 * self.a_pred * self.dt ** 2
+v_pred_step = self.v_pred + self.a_pred * self.dt
+residual = z - x_pred_step
+x_est = x_pred_step + self.alpha * residual
+v_est = v_pred_step + (self.beta / self.dt) * residual
+a_est = self.a_pred + (2 * self.gamma / self.dt ** 2) * residual
+self.x_pred, self.v_pred, self.a_pred = x_est, v_est, a_est
+return x_est
+def filter(self, measurements):
+n = len(measurements)
+filtered = np.zeros(n)
+self.initialize(measurements[0])
+for i in range(n):
+filtered[i] = self.update(measurements[i])
+return filtered
+class AdvancedAdaptiveFilter(AlphaBetaFilter):
+def __init__(self, base_alpha=0.4, window_size=10, std_threshold=5.0):
+super().__init__(alpha=base_alpha, beta=0)
+self.base_alpha = base_alpha
+self.high_alpha = 0.85
+self.residual_window = []
+self.window_size = window_size
+self.std_threshold = std_threshold
+def update(self, z):
+x_pred_step = self.x_pred + self.v_pred * self.dt
+residual = z - x_pred_step
+self.residual_window.append(residual)
+if len(self.residual_window) > self.window_size:
+self.residual_window.pop(0)
+if len(self.residual_window) == self.window_size:
+residual_std = np.std(self.residual_window)
+if residual_std > self.std_threshold:
+self.alpha = self.high_alpha
+else:
+self.alpha = self.base_alpha
+self.beta = (self.alpha ** 2) / (2 - self.alpha)
+x_est = x_pred_step + self.alpha * residual
+v_est = self.v_pred + (self.beta / self.dt) * residual
+self.x_pred, self.v_pred = x_est, v_est
+return x_est, v_est
+class FilteringPlatform:
+def __init__(self, n_samples=300):
+self.n_samples = n_samples
+self.raw_data = None
+self.cleaned_data = None
+self.anomaly_info = None
+def generate_data(self, noise_level=0.1, anomaly_rate=0.05):
+print("Генерація синтетичних даних ...")
+x = np.linspace(0, 10, self.n_samples)
+y_true = 2 + 3 * x - 0.5 * x ** 2 + 5 * np.sin(2 * x)
+noise = np.random.normal(0, noise_level * np.std(y_true), self.n_samples)
+y_noisy = y_true + noise
+n_anomalies = int(self.n_samples * anomaly_rate)
+anomaly_indices = np.random.choice(self.n_samples, n_anomalies, replace=False)
+y_with_anomalies = y_noisy.copy()
+for idx in anomaly_indices:
+if np.random.choice(['high', 'low']) == 'high':
+y_with_anomalies[idx] += np.random.uniform(3, 8) * np.std(y_true)
+else:
+y_with_anomalies[idx] -= np.random.uniform(3, 8) * np.std(y_true)
+self.raw_data = pd.DataFrame({
+'time': x, 'value': y_with_anomalies, 'true_value': y_true,
+'is_anomaly': [i in anomaly_indices for i in range(self.n_samples)]
+})
+print(f"Згенеровано {self.n_samples} записів (аномалій: {n_anomalies})")
+return self.raw_data
+def detect_and_remove_anomalies(self, method='zscore', threshold=3.0):
+print(f"\nВиявлення аномалій ({method})...")
+if self.raw_data is None:
+raise ValueError("Спочатку згенеруйте дані!")
+y = self.raw_data['value'].values
+if method == 'zscore':
+anomaly_mask = np.abs(stats.zscore(y)) > threshold
+elif method == 'iqr':
+Q1, Q3 = np.percentile(y, 25), np.percentile(y, 75)
+IQR = Q3 - Q1
+anomaly_mask = (y < Q1 - threshold * IQR) | (y > Q3 + threshold * IQR)
+else: # mad
+mad = np.median(np.abs(y - np.median(y)))
+anomaly_mask = np.abs(0.6745 * (y - np.median(y)) / mad) > threshold
+# Фільтруємо вихідний DataFrame, щоб зберегти всі стовпці (включно з 'true_value')
+self.cleaned_data = self.raw_data[~anomaly_mask].reset_index(drop=True)
+# Перейменовуємо 'true_value' в 'true' для сумісності з іншими методами
+self.cleaned_data = self.cleaned_data.rename(columns={'true_value': 'true'})
+self.anomaly_info = {'method': method, 'detected': np.sum(anomaly_mask),
+'indices': np.where(anomaly_mask)[0], 'values': y[anomaly_mask]}
+print(f"Виявлено: {np.sum(anomaly_mask)}, Залишилось записів: {len(self.cleaned_data)}/
+{len(self.raw_data)}")
+return self.cleaned_data
+def apply_filters(self):
+# Застосовує всі реалізовані фільтри до очищених даних.
+y = self.cleaned_data['value'].values
+ab_filter = AlphaBetaFilter()
+abg_filter = AlphaBetaGammaFilter()
+adaptive_filter = AdvancedAdaptiveFilter()
+print("\nЗастосування фільтрів...")
+filt_ab = ab_filter.filter(y)
+filt_abg = abg_filter.filter(y)
+filt_adapt = adaptive_filter.filter(y)
+print("Фільтрацію завершено.")
+return filt_ab, filt_abg, filt_adapt
+def evaluate_performance(self, filtered_data, label):
+# Розраховує та виводить RMSE для заданого фільтра.
+true_values = self.cleaned_data['true'].values[:len(filtered_data)]
+rmse = np.sqrt(mean_squared_error(true_values, filtered_data))
+print(f"RMSE для фільтра '{label}': {rmse:.4f}")
+def visualize(self, filt_ab, filt_abg, filt_adapt):
+# Візуалізує результати роботи фільтрів.
+plt.figure(figsize=(14, 8))
+plt.plot(self.cleaned_data['time'], self.cleaned_data['value'], 'k.', alpha=0.3, label='Очищені виміри')
+plt.plot(self.cleaned_data['time'], self.cleaned_data['true'], 'b--', linewidth=2, label='Істинне
+значення')
+plt.plot(self.cleaned_data['time'], filt_ab, 'r-', label='α–β фільтр')
+plt.plot(self.cleaned_data['time'], filt_abg, 'g-', label='α–β–γ фільтр')
+plt.plot(self.cleaned_data['time'], filt_adapt, 'm-', linewidth=2, label='Адаптивний α–β фільтр')
+plt.legend(fontsize=12)
+plt.title('Порівняння рекурентних фільтрів'
+, fontsize=16)
+plt.xlabel('Час'
+, fontsize=12)
+plt.ylabel('Значення'
+, fontsize=12)
+plt.grid(True, which='both', linestyle='--'
+, linewidth=0.5)
+plt.show()
+def main():
+# Основна функція для запуску всього процесу.
+platform = FilteringPlatform(n_samples=300)
+platform.generate_data(noise_level=0.15, anomaly_rate=0.05)
+platform.detect_and_remove_anomalies(method='zscore', threshold=3.0)
+filt_ab, filt_abg, filt_adapt = platform.apply_filters()
+print("\n----- Оцінка якості фільтрів -----")
+platform.evaluate_performance(filt_ab, 'α–β')
+platform.evaluate_performance(filt_abg, 'α–β–γ')
+platform.evaluate_performance(filt_adapt, 'Адаптивний α–β')
+print("---------------------------------\n")
+platform.visualize(filt_ab, filt_abg, filt_adapt)
+if __name__ == "__main__":
+main()
