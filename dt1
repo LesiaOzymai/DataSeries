@@ -1,0 +1,370 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+from scipy.stats import normaltest, jarque_bera
+import seaborn as sns
+import warnings
+import os
+from typing import Dict, Any
+# Налаштування відображення
+plt.rcParams['font.size'] = 12
+plt.rcParams['figure.figsize'] = (10, 6)
+sns.set_style("whitegrid")
+warnings.filterwarnings('ignore')
+#Клас для аналізу дати з генерацією синтетичних даних
+class BigDataAnalyzer:
+def __init__(self, seed: int = 42):
+self.seed = seed
+np.random.seed(seed)
+self.results = {}
+self.output_dir = "lab_results"
+os.makedirs(self.output_dir, exist_ok=True)
+def generate_noise(self, distribution: str, size: int, **params) -> np.ndarray:
+np.random.seed(self.seed)
+if distribution == 'normal': # Нормальний розподіл
+mu = params.get('mu', 0.0)
+sigma = params.get('sigma', 1.0)
+return np.random.normal(mu, sigma, size)
+elif distribution == 'exponential': # Експоненційний розподіл
+scale = params.get('scale', 1.0)
+return np.random.exponential(scale, size)
+else:
+raise ValueError(f"Непідтримуваний розподіл: {distribution}")
+#Генерація тренду досліджуваного процесу
+def generate_trend(self, trend_type: str, size: int, **params) -> np.ndarray:
+t = np.arange(size)
+if trend_type == 'constant': # Постійний тренд
+C = params.get('C', 100.0)
+return np.full(size, C)
+elif trend_type == 'quadratic': # Квадратичний тренд
+A = params.get('A', 0.01)
+B = params.get('B', 0.5)
+C = params.get('C', 100.0)
+return A * t ** 2 + B * t + C
+else:
+raise ValueError(f"Непідтримуваний тип тренду: {trend_type}")
+#Створення синтетичного ряду як адитивної моделі тренду та шуму
+def create_synthetic_series(self, name: str, size: int, trend_config: Dict, noise_config: Dict) ->
+Dict[
+str, np.ndarray]:
+# Генерація тренду
+trend = self.generate_trend(**trend_config, size=size)
+# Генерація шуму
+noise = self.generate_noise(**noise_config, size=size)
+# Адитивна модель: X(t) = U(t) + ε(t)
+series = trend + noise
+return {
+'trend': trend,
+'noise': noise,
+'series': series,
+'time': np.arange(size)
+}
+#Розрахунок статистичних характеристик
+def calculate_statistics(self, data: np.ndarray, name: str = "") -> Dict[str, Any]:
+data = np.asarray(data).flatten()
+data = data[~np.isnan(data)] # Видалення NaN значень
+if len(data) == 0:
+return {"error": "Немає валідних даних"}
+stats_dict = {
+'n': len(data),
+'mean': np.mean(data), # Математичне очікування
+'variance': np.var(data, ddof=0), # Дисперсія
+'std': np.std(data, ddof=0), # Середньоквадратичне відхилення
+'sample_variance': np.var(data, ddof=1), # Вибіркова дисперсія
+'sample_std': np.std(data, ddof=1), # Вибіркове СКВ
+'median': np.median(data),
+'min': np.min(data),
+'max': np.max(data),
+'range': np.max(data) - np.min(data),
+'skewness': stats.skew(data), # Асиметрія
+'kurtosis': stats.kurtosis(data), # Ексцес
+'q25': np.percentile(data, 25),
+'q75': np.percentile(data, 75)
+}
+# Тести нормальності
+try:
+# Тест Д'Агостіно-Пірсона
+k2, p_dagostino = normaltest(data)
+stats_dict['dagostino_test_stat'] = k2
+stats_dict['dagostino_p_value'] = p_dagostino
+stats_dict['is_normal_dagostino'] = p_dagostino > 0.05
+# Тест Жарка-Бера
+jb_stat, jb_p = jarque_bera(data)
+stats_dict['jarque_bera_stat'] = jb_stat
+stats_dict['jarque_bera_p_value'] = jb_p
+stats_dict['is_normal_jb'] = jb_p > 0.05
+except Exception as e:
+stats_dict['test_error'] = str(e)
+return stats_dict
+#Побудова гістограми з аналізом розподілу
+def plot_histogram_analysis(self, data: np.ndarray, title: str, filename: str):
+fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+# Гістограма з щільністю
+ax1.hist(data, bins=30, density=True, alpha=0.7, color='skyblue', edgecolor='black')
+mu, sigma = stats.norm.fit(data)
+x = np.linspace(data.min(), data.max(), 100)
+ax1.plot(x, stats.norm.pdf(x, mu, sigma), 'r-', linewidth=2,
+label=f'Normal fit (μ={mu:.2f}, σ={sigma:.2f})')
+ax1.set_title(f'{title} - Гістограма з підгонкою')
+ax1.set_xlabel('Значення')
+ax1.set_ylabel('Щільність')
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+# Q-Q plot для нормальності
+stats.probplot(data, dist="norm", plot=ax2)
+ax2.set_title('Q-Q Plot (Normal)')
+ax2.grid(True, alpha=0.3)
+# Boxplot
+ax3.boxplot(data)
+ax3.set_title('Box Plot')
+ax3.set_ylabel('Значення')
+ax3.grid(True, alpha=0.3)
+# Часовий ряд
+ax4.plot(data)
+ax4.set_title('Часовий ряд')
+ax4.set_xlabel('Час')
+ax4.set_ylabel('Значення')
+ax4.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(os.path.join(self.output_dir, filename), dpi=300, bbox_inches='tight')
+plt.close()
+#Аналіз стаціонарності часового ряду
+def analyze_stationarity(self, data: np.ndarray) -> Dict[str, Any]:
+try:
+from statsmodels.tsa.stattools import adfuller
+#Тест Дікі-Фуллера
+result = adfuller(data, autolag='AIC')
+return {
+'adf_statistic': result[0],
+'adf_p_value': result[1],
+'adf_critical_values': result[4],
+'is_stationary': result[1] < 0.05,
+'used_lags': result[2],
+'n_observations': result[3]}
+except ImportError:
+# Простий тест на постійність середнього
+n_parts = 3
+part_size = len(data) // n_parts
+means = []
+for i in range(n_parts):
+start_idx = i * part_size
+end_idx = start_idx + part_size
+means.append(np.mean(data[start_idx:end_idx]))
+# F-тест на рівність дисперсій
+f_stat, f_p = stats.f_oneway(*[data[i * part_size:(i + 1) * part_size]
+for i in range(n_parts)])
+return {
+'simple_stationarity_test': True,
+'part_means': means,
+'mean_variation': np.std(means),
+'f_statistic': f_stat,
+'f_p_value': f_p,
+'is_stationary_simple': f_p > 0.05
+}
+#Завантаження реальних даних з Excel файлу
+def load_real_data(self, filepath: str) -> pd.DataFrame:
+try:
+if filepath.endswith('.xlsx') or filepath.endswith('.xls'):
+df = pd.read_excel(filepath)
+else:
+df = pd.read_csv(filepath)
+print(f"Завантажено файл з {len(df)} рядків та стовпцями: {list(df.columns)}")
+# Пошук числових стовпців
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+if not numeric_cols:
+raise ValueError("У файлі немає числових стовпців")
+# Пошук стовпців з валютою
+currency_cols = [col for col in df.columns
+if any(curr in str(col).upper()
+for curr in ['USD', 'EUR', 'UAH',
+'КУРС'
+, 'RATE'])]
+if currency_cols:
+value_col = currency_cols[0]
+else:
+value_col = numeric_cols[0]
+print(f"Використовується стовпець для аналізу: {value_col}")
+clean_data = df[value_col].dropna()
+return pd.DataFrame({
+'value': clean_data,
+'index': range(len(clean_data))
+})
+except Exception as e:
+print(f"Помилка при завантаженні файлу {filepath}: {e}")
+return pd.DataFrame()
+#Повний аналіз
+def run_full_analysis(self):
+print("=" * 60)
+print("РОЗПОЧАТО АНАЛІЗ")
+print("=" * 60)
+indicators_config = {
+'Квад_Норм': {
+'size': 250,
+'trend': {'trend_type': 'quadratic', 'A': 0.002, 'B': 0.1, 'C': 28.5},
+'noise': {'distribution': 'normal', 'mu': 0.0, 'sigma': 0.5}
+},
+'Конст
+_
+Експ': {
+'size': 365,
+'trend': {'trend_type': 'constant', 'C': 15.2},
+'noise': {'distribution': 'exponential', 'scale': 2.0}
+},
+'Квад_Норм2': {
+'size': 180,
+'trend': {'trend_type': 'quadratic', 'A': -0.01, 'B': 1.5, 'C': 100.0},
+'noise': {'distribution': 'normal', 'mu': 0.0, 'sigma': 3.0}
+}
+}
+all_results = {}
+# Аналіз даних
+print("\n1. АНАЛІЗ ДАНИХ")
+print("-" * 40)
+for name, config in indicators_config.items():
+print(f"\nАналізуємо: {name}")
+synthetic = self.create_synthetic_series(
+name=name,
+size=config['size'],
+trend_config=config['trend'],
+noise_config=config['noise']
+)
+trend_stats = self.calculate_statistics(synthetic['trend'], f"{name}_trend")
+noise_stats = self.calculate_statistics(synthetic['noise'], f"{name}_noise")
+series_stats = self.calculate_statistics(synthetic['series'], f"{name}_series")
+stationarity = self.analyze_stationarity(synthetic['series'])
+all_results[name] = {
+'data': synthetic,
+'trend_stats': trend_stats,
+'noise_stats': noise_stats,
+'series_stats': series_stats,
+'stationarity': stationarity
+}
+self.plot_histogram_analysis(
+synthetic['noise'], f"{name} - Шум"
+, f"{name}_noise_analysis.png"
+)
+self.plot_histogram_analysis(
+synthetic['series'], f"{name} - Повний ряд"
+, f"{name}_series_analysis.png"
+)
+# Графіки
+plt.figure(figsize=(12, 8))
+plt.subplot(2, 1, 1)
+plt.plot(synthetic['time'], synthetic['trend'], 'b-', linewidth=2, label=
+'Тренд')
+plt.plot(synthetic['time'], synthetic['series'], 'r-', alpha=0.7, label=
+'Ряд з шумом')
+plt.title(f'{name} - Тренд та синтетичний ряд')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.subplot(2, 1, 2)
+plt.plot(synthetic['time'], synthetic['noise'], 'g-', alpha=0.8)
+plt.title(f'{name} - Шум (похибка)')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(os.path.join(self.output_dir, f"{name}_trends_plot.png"), dpi=300)
+plt.close()
+print(f" Тренд - Середнє: {trend_stats['mean']:.3f}, СКВ: {trend_stats['std']:.3f}")
+print(f" Шум - Середнє: {noise_stats['mean']:.3f}, СКВ: {noise_stats['std']:.3f}")
+print(f" Ряд - Середнє: {series_stats['mean']:.3f}, СКВ: {series_stats['std']:.3f}")
+print(f" Стаціонарність: {'Так' if stationarity.get('is_stationary', False) else 'Ні'}")
+self.save_results_to_csv(all_results)
+#Аналіз реальних даних
+print("\n2. АНАЛІЗ РЕАЛЬНИХ ДАНИХ")
+print("-" * 40)
+real_data_path = "/Users/lesyaozymai/pythonProject/pythonProject2/PythonProject1/kpi/
+1lab/Oschadbank - Архів курсу валюти для Ощад24-7 20-09-2025 (USD).xlsx"
+if os.path.exists(real_data_path):
+df = pd.read_excel(real_data_path)
+currency_cols = [col for col in df.columns if
+any(curr in str(col).upper() for curr in ['USD', 'EUR', 'UAH'])]
+currency_cols = currency_cols[:3]
+for col in currency_cols:
+print(f"\nАналізуємо реальні дані: {col}")
+values = df[col].dropna().values
+real_stats = self.calculate_statistics(values, f"real_{col}")
+real_stationarity = self.analyze_stationarity(values)
+self.plot_histogram_analysis(values, f"Реальні дані {col}"
+, f"real_{col}_analysis.png")
+print(f" {col} - Середнє: {real_stats['mean']:.3f}, СКВ: {real_stats['std']:.3f}")
+print(f" Стаціонарність: {'Так' if real_stationarity.get('is_stationary', False) else 'Ні'}")
+all_results[f"Real_{col}"] = {
+'data': {'series': values},
+'series_stats': real_stats,
+'stationarity': real_stationarity
+}
+else:
+print(f"Файл реальних даних не знайдено: {real_data_path}")
+self.generate_summary_report(all_results)
+print("\n" + "=" * 60)
+print("АНАЛІЗ ЗАВЕРШЕНО")
+print(f"Результати збережено в папці: {self.output_dir}")
+print("=" * 60)
+return all_results
+#Збереження результатів
+def save_results_to_csv(self, results: Dict):
+summary_data = []
+for name, data in results.items():
+if 'series_stats' in data:
+stats = data['series_stats']
+row = {
+'Показник': name,
+'Середнє': stats.get('mean', 0),
+'Дисперсія': stats.get('variance', 0),
+'СКВ': stats.get('std', 0),
+'Медіана': stats.get('median', 0),
+'Асиметрія': stats.get('skewness', 0),
+'Ексцес': stats.get('kurtosis', 0),
+'Мінімум': stats.get('min', 0),
+'Максимум': stats.get('max', 0),
+'Нормальність_JB': stats.get('is_normal_jb', False),
+'Стаціонарність': data.get('stationarity', {}).get('is_stationary', False) }
+summary_data.append(row)
+df_summary = pd.DataFrame(summary_data)
+df_summary.to_csv(os.path.join(self.output_dir, "statistical_summary.csv"),
+index=False, encoding='utf-8')
+detailed_results = {}
+for name, data in results.items():
+if 'data' in data and 'series' in data['data']:
+detailed_results[f"{name}_series"] = data['data']['series']
+if 'trend' in data['data']:
+detailed_results[f"{name}_trend"] = data['data']['trend']
+if 'noise' in data['data']:
+detailed_results[f"{name}_noise"] = data['data']['noise']
+max_len = max(len(arr) for arr in detailed_results.values())
+for key in detailed_results:
+arr = detailed_results[key]
+if len(arr) < max_len:
+detailed_results[key] = np.concatenate([arr, np.full(max_len - len(arr), np.nan)])
+df_detailed = pd.DataFrame(detailed_results)
+df_detailed.to_csv(os.path.join(self.output_dir, "detailed_data.csv"),
+index=False, encoding='utf-8')
+#Генерація підсумкового звіту (вивід у консоль)
+def generate_summary_report(self, results: Dict):
+print("\nРЕЗУЛЬТАТИ АНАЛІЗУ:")
+print("-" * 30 + "\n")
+for name, data in results.items():
+if 'series_stats' in data:
+print(f"ПОКАЗНИК: {name}")
+stats = data['series_stats']
+print(f" Кількість спостережень: {stats.get('n', 'N/A')}")
+print(f" Математичне очікування: {stats.get('mean', 0):.4f}")
+print(f" Дисперсія: {stats.get('variance', 0):.4f}")
+print(f" Середньоквадратичне відхилення: {stats.get('std', 0):.4f}")
+print(f" Коефіцієнт асиметрії: {stats.get('skewness', 0):.4f}")
+print(f" Коефіцієнт ексцесу: {stats.get('kurtosis', 0):.4f}")
+# Інтерпретація нормальності
+is_normal = stats.get('is_normal_jb', False)
+print(f" Нормальність розподілу: {'Підтверджується' if is_normal else 'Не
+підтверджується'}")
+# Стаціонарність
+stationarity = data.get('stationarity', {})
+is_stationary = stationarity.get('is_stationary', False)
+print(f" Стаціонарність: {'Стаціонарний' if is_stationary else 'Нестаціонарний'}")
+print()
+def main():
+analyzer = BigDataAnalyzer(seed=42)
+results = analyzer.run_full_analysis()
+if __name__ == "__main__":
+main()
