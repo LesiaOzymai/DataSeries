@@ -1,0 +1,369 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error, mean_absolute_error,
+mean_absolute_percentage_error
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+import warnings
+warnings.filterwarnings('ignore')
+# 1. Завантаження даних
+file_name = "/Users/lesyaozymai/pythonProject/pythonProject2/PythonProject1/kpi/8lab/
+Data_Set_3.xlsx"
+try:
+df = pd.read_excel(file_name)
+except FileNotFoundError:
+print(f"ПОМИЛКА: Файл '{file_name}' не знайдено.")
+exit()
+except Exception as e:
+print(f"ПОМИЛКА при читанні файлу: {e}")
+exit()
+print("Початковий вигляд даних (перші 5 рядків):")
+print(df.head())
+# 2. Препроцесинг даних
+print("\nІнформація про стовпці та типи даних:")
+df.info()
+print("\nКонвертування 'OrderDate' з Excel-формату")
+try:
+df['OrderDate'] = pd.to_datetime(df['OrderDate'])
+print("Конвертація 'OrderDate' завершена успішно")
+except Exception as e:
+print(f"Помилка конвертації дат: {e}")
+# Сортування за датою
+df = df.sort_values("OrderDate").reset_index(drop=True)
+# 3. Вибір цільового часового ряду
+print("\nАНАЛІЗ ЧАСОВОГО РЯДУ")
+print("'Total' -- цільовий часовий ряд.")
+series = df.set_index("OrderDate")["Total"]
+# 4. Обробка пропусків та шумів
+series_clean = series.ﬃll().bfill()
+# Аналіз стаціонарності
+def check_stationarity(timeseries):
+result = adfuller(timeseries.dropna())
+print(f"ADF Statistic: {result[0]:.4f}")
+print(f"p-value: {result[1]:.4f}")
+if result[1] <= 0.05:
+print("Ряд є стаціонарним (p-value ≤ 0.05)")
+return True
+else:
+print("Ряд нестаціонарний (p-value > 0.05)")
+return False
+print("\nТест Дікі-Фуллера на стаціонарність:")
+is_stationary = check_stationarity(series_clean)
+# Декомпозиція часового ряду
+print("\nДекомпозиція часового ряду:")
+try:
+# Адаптивний вибір періоду
+period = min(7, len(series_clean) // 2)
+if period < 2:
+raise ValueError("Недостатньо даних для декомпозиції")
+decomposition = seasonal_decompose(series_clean, period=period, model='additive')
+plt.figure(figsize=(12, 8))
+plt.subplot(4, 1, 1)
+decomposition.observed.plot(title='Оригінальний ряд')
+plt.ylabel('Спостереження')
+plt.subplot(4, 1, 2)
+decomposition.trend.plot(title='Тренд')
+plt.ylabel('Тренд')
+plt.subplot(4, 1, 3)
+decomposition.seasonal.plot(title='Сезонність')
+plt.ylabel('Сезонність')
+plt.subplot(4, 1, 4)
+decomposition.resid.plot(title='Залишки')
+plt.ylabel('Залишки')
+plt.tight_layout()
+plt.savefig("time_series_decomposition.png")
+print("Графік декомпозиції збережено: time_series_decomposition.png")
+except Exception as e:
+print(f"Неможливо виконати декомпозицію: {e}")
+# Ковзне середнє для візуалізації
+rolling_window = 7
+rolling_mean = series_clean.rolling(window=rolling_window, min_periods=1).mean()
+# 5. Базова візуалізація
+print("\nВІЗУАЛІЗАЦІЯ ДАНИХ")
+# Графік 1: Очищений ряд
+plt.figure(figsize=(12, 6))
+series_clean.plot(title="Часовий ряд продажів (Total) - Очищений", grid=True)
+plt.xlabel("Дата")
+plt.ylabel("Сума продажів")
+plt.tight_layout()
+plot_filename_1 = "sales_timeseries_clean.png"
+plt.savefig(plot_filename_1)
+print(f"Графік 1 збережено: {plot_filename_1}")
+# Графік 2: Ряд + Ковзне середнє
+plt.figure(figsize=(12, 6))
+series_clean.plot(label="Очищені дані", alpha=0.7)
+rolling_mean.plot(label=f"Ковзне середнє (вікно={rolling_window})", linewidth=3, color='red')
+plt.title("Очищений ряд + Ковзне середнє")
+plt.xlabel("Дата")
+plt.ylabel("Сума продажів")
+plt.legend()
+plt.grid()
+plt.tight_layout()
+plot_filename_2 = "sales_timeseries_rolling_mean.png"
+plt.savefig(plot_filename_2)
+print(f"Графік 2 збережено: {plot_filename_2}")
+# 6. РОЗШИРЕНЕ ПРОГНОЗУВАННЯ
+print("\nРОЗШИРЕНЕ ПРОГНОЗУВАННЯ")
+# Горизонт прогнозу
+forecast_horizon = max(int(len(series_clean) * 0.1), 10)
+print(f"Горизонт прогнозу: {forecast_horizon} точок (днів)")
+# Розділення на train/test
+y = series_clean
+train_frac = 0.85
+n_train = int(len(y) * train_frac)
+y_train = y.iloc[:n_train]
+y_test = y.iloc[n_train:]
+print(f"Розмір вибірки: {len(y)}. Тренувальна: {len(y_train)}. Тестова: {len(y_test)}.")
+# Функція для оцінки якості прогнозу
+def evaluate_forecast(y_true, y_pred, model_name):
+mae = mean_absolute_error(y_true, y_pred)
+mape = mean_absolute_percentage_error(y_true, y_pred)
+rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+print(f"\nОцінка якості ({model_name}):")
+print(f" MAE: {mae:.2f}")
+print(f" MAPE: {mape:.2%}")
+print(f" RMSE: {rmse:.2f}")
+# Коефіцієнт детермінації
+ss_res = np.sum((y_true - y_pred) ** 2)
+ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+print(f" R²: {r2:.4f}")
+return {'MAE': mae, 'MAPE': mape, 'RMSE': rmse, 'R2': r2}
+# Функція для пошуку найкращих параметрів ARIMA
+def find_best_arima(y_train, max_p=2, max_d=1, max_q=2):
+best_aic = np.inf
+best_order = (1, 1, 1) # значення за замовчуванням
+print("\nПошук найкращих параметрів ARIMA...")
+for p in range(max_p + 1):
+for d in range(max_d + 1):
+for q in range(max_q + 1):
+if p == 0 and d == 0 and q == 0:
+continue
+try:
+model = sm.tsa.ARIMA(y_train, order=(p, d, q))
+model_fit = model.fit()
+if model_fit.aic < best_aic:
+best_aic = model_fit.aic
+best_order = (p, d, q)
+# print(f" Знайдено кращі параметри: {best_order} (AIC: {best_aic:.2f})")
+except:
+continue
+return best_order, best_aic
+# Зберігаємо результати всіх моделей
+models_results = {}
+# 6.1 МОДЕЛЬ ARIMA З ОПТИМІЗАЦІЄЮ
+print("\n1. МОДЕЛЬ ARIMA")
+try:
+# Пошук найкращих параметрів
+best_order, best_aic = find_best_arima(y_train)
+print(f"Найкращі параметри ARIMA: {best_order} (AIC: {best_aic:.2f})")
+# Навчання моделі з найкращими параметрами
+model_arima = sm.tsa.ARIMA(y_train, order=best_order)
+model_arima_fit = model_arima.fit()
+# Прогноз на тестовому періоді
+start_step = len(y_train)
+end_step = start_step + len(y_test) - 1
+pred_test_arima = model_arima_fit.predict(start=start_step, end=end_step, dynamic=False)
+pred_test_arima.index = y_test.index
+# Прогноз у майбутнє
+start_future = len(y_train) + len(y_test)
+end_future = start_future + forecast_horizon - 1
+forecast_arima = model_arima_fit.predict(start=start_future, end=end_future, dynamic=False)
+# Створення індексу для майбутнього
+last_date = y.index[-1]
+future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=forecast_horizon,
+freq='D')
+forecast_arima.index = future_dates
+# Оцінка якості
+arima_metrics = evaluate_forecast(y_test, pred_test_arima, f"ARIMA{best_order}")
+models_results['ARIMA'] = {
+'predictions': pred_test_arima,
+'forecast': forecast_arima,
+'metrics': arima_metrics,
+'type': f"ARIMA{best_order}"
+}
+except Exception as e:
+print(f"Помилка ARIMA: {e}")
+models_results['ARIMA'] = None
+# 6.2 МОДЕЛЬ ЕКСПОНЕНЦІЙНОГО ЗГЛАДЖУВАННЯ
+print("\n2. МОДЕЛЬ ЕКСПОНЕНЦІЙНОГО ЗГЛАДЖУВАННЯ")
+try:
+# Спрощена модель Holt-Winters
+ets_model = ExponentialSmoothing(y_train, trend='add', seasonal=None)
+ets_fit = ets_model.fit()
+# Прогноз на тестовому періоді
+ets_test_pred = ets_fit.forecast(len(y_test))
+ets_test_pred.index = y_test.index
+# Прогноз у майбутнє
+ets_forecast = ets_fit.forecast(forecast_horizon)
+ets_forecast.index = future_dates
+# Оцінка якості
+ets_metrics = evaluate_forecast(y_test, ets_test_pred, "Exponential Smoothing")
+models_results['ETS'] = {
+'predictions': ets_test_pred,
+'forecast': ets_forecast,
+'metrics': ets_metrics,
+'type': "Exponential Smoothing"
+}
+except Exception as e:
+print(f"Помилка Exponential Smoothing: {e}")
+models_results['ETS'] = None
+# 6.3 МОДЕЛЬ RIDGE РЕГРЕСІЇ
+print("\n3. МОДЕЛЬ RIDGE РЕГРЕСІЇ")
+try:
+def make_lag_features(series, lags=5):
+X = pd.concat([series.shift(i) for i in range(1, lags + 1)], axis=1)
+X.columns = [f'lag_{i}' for i in range(1, lags + 1)]
+return X
+lags = min(5, len(y) // 4) # Адаптивна кількість лагів
+X = make_lag_features(y, lags=lags).dropna()
+y_lag = y.loc[X.index]
+# Розділення для лаг-регресії
+n_train_lag = int(len(X) * train_frac)
+X_train, X_test = X.iloc[:n_train_lag], X.iloc[n_train_lag:]
+y_train_lag, y_test_lag = y_lag.iloc[:n_train_lag], y_lag.iloc[n_train_lag:]
+model_ridge = Ridge(alpha=1.0)
+model_ridge.fit(X_train, y_train_lag)
+# Прогноз на тестовому періоді
+pred_test_ridge = pd.Series(model_ridge.predict(X_test), index=y_test_lag.index)
+# Рекурсивний прогноз у майбутнє
+last_obs_lags = y.iloc[-lags:].values
+preds_future_ridge = []
+for _ in range(forecast_horizon):
+x_in = last_obs_lags[-lags:][::-1].reshape(1, -1)
+pred_val = model_ridge.predict(x_in)[0]
+preds_future_ridge.append(pred_val)
+last_obs_lags = np.append(last_obs_lags, pred_val)
+forecast_ridge = pd.Series(preds_future_ridge, index=future_dates)
+# Оцінка якості
+ridge_metrics = evaluate_forecast(y_test_lag, pred_test_ridge, f"Ridge (lags={lags})")
+models_results['Ridge'] = {
+'predictions': pred_test_ridge,
+'forecast': forecast_ridge,
+'metrics': ridge_metrics,
+'type': f"Ridge Regression (lags={lags})"
+}
+except Exception as e:
+print(f"Помилка Ridge регресії: {e}")
+models_results['Ridge'] = None
+# ВИБІР НАЙКРАЩОЇ МОДЕЛІ
+print("\nПОРІВНЯННЯ МОДЕЛЕЙ")
+best_model = None
+best_rmse = np.inf
+for model_name, result in models_results.items():
+if result is not None:
+rmse = result['metrics']['RMSE']
+print(f"{model_name:>25}: RMSE = {rmse:8.2f}, R² = {result['metrics']['R2']:6.4f}")
+if rmse < best_rmse:
+best_rmse = rmse
+best_model = model_name
+if best_model:
+print(f"\nНАЙКРАЩА МОДЕЛЬ: {best_model} (RMSE: {best_rmse:.2f})")
+final_predictions = models_results[best_model]['predictions']
+final_forecast = models_results[best_model]['forecast']
+model_type = models_results[best_model]['type']
+else:
+print("\nЖодна модель не дала результатів.")
+# Створюємо резервні порожні серії, щоб уникнути помилок
+final_predictions = pd.Series(dtype='float64')
+final_forecast = pd.Series(dtype='float64')
+model_type = "No Model"
+# Якщо ARIMA існує, використовуємо її як резервну
+if models_results.get('ARIMA'):
+print("Використовую ARIMA як резервну модель.")
+final_predictions = models_results['ARIMA']['predictions']
+final_forecast = models_results['ARIMA']['forecast']
+model_type = models_results['ARIMA']['type']
+# 7. ФІНАЛЬНА ВІЗУАЛІЗАЦІЯ
+print("\nФІНАЛЬНА ВІЗУАЛІЗАЦІЯ")
+plt.figure(figsize=(15, 10))
+# Основний графік прогнозу
+plt.subplot(2, 1, 1)
+y_train.plot(label="Тренувальні дані", alpha=0.7, linewidth=2)
+y_test.plot(label="Тестові дані (Факт)", alpha=0.9, color='orange', linewidth=2)
+# Перевірка, чи прогнози не порожні
+if not final_predictions.empty:
+final_predictions.plot(label="Прогноз на Тесті", linestyle='--', color='green', linewidth=2)
+if not final_forecast.empty:
+final_forecast.plot(label="Прогноз у майбутнє", linestyle='--', color='red', linewidth=3)
+plt.title(f"Прогноз продажів - Найкраща модель: {model_type}\nRMSE: {best_rmse:.2f}", fontsize=14,
+fontweight='bold')
+plt.xlabel("Дата")
+plt.ylabel("Сума продажів")
+plt.legend()
+plt.grid(True, alpha=0.3)
+# Графік порівняння моделей
+plt.subplot(2, 1, 2)
+model_names = []
+rmse_values = []
+for model_name, result in models_results.items():
+if result is not None:
+model_names.append(model_name)
+rmse_values.append(result['metrics']['RMSE'])
+if model_names: # Малюємо стовпці, лише якщо є дані
+colors = ['green' if name == best_model else 'blue' for name in model_names]
+bars = plt.bar(model_names, rmse_values, color=colors, alpha=0.7)
+plt.title("Порівняння якості моделей (RMSE)")
+plt.ylabel("RMSE")
+plt.xticks(rotation=45)
+# Додати значення на стовпці
+for bar, value in zip(bars, rmse_values):
+plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 5, f'{value:.1f}',
+ha='center', va='bottom', fontweight='bold')
+else:
+plt.title("Порівняння якості моделей (немає даних)")
+plt.tight_layout()
+plot_filename_3 = "sales_forecast_comprehensive.png"
+plt.savefig(plot_filename_3, dpi=300, bbox_inches='tight')
+print(f"Комплексний графік прогнозу збережено: {plot_filename_3}")
+# 8. ЗБЕРЕЖЕННЯ РЕЗУЛЬТАТІВ
+print("\nЗБЕРЕЖЕННЯ РЕЗУЛЬТАТІВ")
+output_csv = "Data_Set_3_comprehensive_analysis.csv"
+# Створення комплексного DataFrame
+df_out = series_clean.to_frame(name="Total_Cleaned")
+# Додавання прогнозів найкращої моделі
+df_out = pd.concat([
+df_out,
+final_predictions.to_frame(name="Best_Model_Test_Prediction"),
+final_forecast.to_frame(name="Best_Model_Future_Forecast")
+], axis=1)
+# Додавання прогнозів всіх моделей
+for model_name, result in models_results.items():
+if result is not None:
+df_out = pd.concat([
+df_out,
+result['predictions'].to_frame(name=f"{model_name}_Test_Pred"),
+result['forecast'].to_frame(name=f"{model_name}_Future_Fcst")
+], axis=1)
+df_out.to_csv(output_csv, index=True)
+print(f"Комплексні результати аналізу збережено у файл: {output_csv}")
+# 9. ФІНАЛЬНИЙ ЗВІТ
+print("\nФІНАЛЬНИЙ ЗВІТ")
+print(f"Статистика часового ряду:")
+print(f" Середнє значення: {series_clean.mean():.2f}")
+print(f" Стандартне відхилення: {series_clean.std():.2f}")
+print(f" Мінімальне значення: {series_clean.min():.2f}")
+print(f" Максимальне значення: {series_clean.max():.2f}")
+print(f" Коефіцієнт варіації: {series_clean.std() / series_clean.mean():.2%}")
+if best_model:
+print(f"\nРезультати прогнозування:")
+print(f" Найкраща модель: {model_type}")
+print(f" RMSE найкращої моделі: {best_rmse:.2f}")
+print(f" Відносна помилка (RMSE/Mean): {best_rmse / series_clean.mean():.2%}")
+print(f"\nЯкість інших моделей:")
+for model_name, result in models_results.items():
+if result is not None and model_name != best_model:
+print(f" {model_name:>25}: RMSE = {result['metrics']['RMSE']:8.2f}")
+else:
+print("\nРезультати прогнозування: Жодна модель не змогла згенерувати прогноз.")
+print(f"\nСтворені файли:")
+print(f" • {plot_filename_1} - Очищений часовий ряд")
+print(f" • {plot_filename_2} - Ряд з ковзним середнім")
+print(f" • time_series_decomposition.png - Декомпозиція ряду")
+print(f" • {plot_filename_3} - Комплексний прогноз")
+print(f" • {output_csv} - Детальні результати аналізу")
+print("\nАНАЛІЗ УСПІШНО ЗАВЕРШЕНО!")
