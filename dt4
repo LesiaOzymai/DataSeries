@@ -1,0 +1,232 @@
+import os
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.stattools import adfuller, acf, pacf
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans, AgglomerativeClustering
+from sklearn.decomposition import PCA
+DATA_PATH = "Data_Set_3.xlsx"
+OUT_DIR = "outputs"
+os.makedirs(OUT_DIR, exist_ok=True)
+PLOT_SHOW = True
+# Function to load the sheet from the Excel file
+def load_excel(path):
+xls = pd.ExcelFile(path)
+sheet = xls.sheet_names[0]
+df = xls.parse(sheet)
+print(f"Loaded sheet '{sheet}' shape={df.shape}")
+return df
+# Function to detect a datetime column and set it as index
+def detect_datetime_index(df):
+df2 = df.copy()
+for col in df2.columns[:6]:
+if isinstance(col, str) and ('date' in col.lower() or 'time' in col.lower()):
+parsed = pd.to_datetime(df2[col], errors='coerce')
+if parsed.notnull().mean() > 0.6:
+df2 = df2.set_index(parsed)
+df2.index.name = 'datetime'
+df2 = df2.drop(columns=[col], errors='ignore')
+print(f"Using column '{col}' as datetime index.")
+return df2
+# If not found, try first column
+first = df2.columns[0]
+parsed = pd.to_datetime(df2[first], errors='coerce')
+if parsed.notnull().mean() > 0.6:
+df2 = df2.set_index(parsed)
+df2.index.name = 'datetime'
+df2 = df2.drop(columns=[first], errors='ignore')
+print(f"Using first column '{first}' as datetime index.")
+return df2
+# Otherwise, generate artificial daily index
+df2.index = pd.date_range(start="2000-01-01", periods=len(df2), freq='D')
+df2.index.name = 'datetime'
+print("No datetime column detected; using generated daily index.")
+return df2
+# Function to decompose time series into trend, seasonality, and residuals
+def decompose_and_plot(series, period=None, model='additive', title_prefix=""):
+s = series.dropna()
+if period is None:
+period = 7 if len(s) > 14 else max(2, len(s)//5)
+try:
+res = seasonal_decompose(s, model=model, period=period, extrapolate_trend='freq')
+except Exception as e:
+print(f"Decomposition failed for {series.name}: {e}")
+return None
+# Plot observed, trend, seasonal, and residual components
+fig, axes = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
+axes[0].plot(res.observed); axes[0].set_ylabel('observed')
+axes[1].plot(res.trend); axes[1].set_ylabel('trend')
+axes[2].plot(res.seasonal); axes[2].set_ylabel('seasonal')
+axes[3].plot(res.resid); axes[3].set_ylabel('resid')
+fig.suptitle(f"{title_prefix}{series.name} decomposition (period={period})")
+plt.tight_layout(rect=[0, 0, 1, 0.97])
+fname = os.path.join(OUT_DIR, f"decomp_{series.name}.png")
+fig.savefig(fname)
+if PLOT_SHOW: plt.show()
+plt.close(fig)
+return res
+# Function to check stationarity
+def stationarity_tests(series):
+s = series.dropna()
+out = {'adf_pval': np.nan, 'is_stationary': None, 'ljung_p': np.nan}
+if len(s) < 10:
+return out
+adf = adfuller(s, autolag='AIC') # Augmented Dickey-Fuller test
+lb = acorr_ljungbox(s, lags=[10], return_df=True) # Ljung-Box autocorrelation test
+out['adf_pval'] = float(adf[1])
+out['is_stationary'] = adf[1] < 0.05
+out['ljung_p'] = float(lb['lb_pvalue'].iloc[0])
+return out
+# Function to plot autocorrelation (ACF) and partial autocorrelation (PACF)
+def acf_pacf_plot(series, lags=20):
+s = series.fillna(method='ffill').fillna(method='bfill')
+acfs = acf(s, nlags=lags, fft=True)
+pacfs = pacf(s, nlags=lags)
+fig, ax = plt.subplots(2,1,figsize=(10,6))
+ax[0].stem(range(len(acfs)), acfs); ax[0].set_title(f"ACF - {series.name}")
+ax[1].stem(range(len(pacfs)), pacfs); ax[1].set_title(f"PACF - {series.name}")
+plt.tight_layout()
+fname = os.path.join(OUT_DIR, f"acf_pacf_{series.name}.png")
+fig.savefig(fname)
+if PLOT_SHOW: plt.show()
+plt.close(fig)
+# Function to extract key statistical features from a series
+def extract_features(series):
+s = series.dropna()
+props = {
+'length': len(s),
+'mean': float(s.mean()),
+'std': float(s.std()),
+'skew': float(s.skew()),
+'kurtosis': float(s.kurtosis()),
+'min': float(s.min()),
+'max': float(s.max())
+}
+# Compute autocorrelation values
+s_f = series.fillna(method='ffill').fillna(method='bfill')
+acfs = acf(s_f, nlags=5, fft=True)
+props['acf1'] = float(acfs[1]) if len(acfs)>1 else 0.0
+props['acf5'] = float(acfs[5]) if len(acfs)>5 else 0.0
+# Estimate seasonal strength via decomposition
+dec = decompose_and_plot(series, period=7, title_prefix="(feature) ") if len(s)>=14 else None
+if dec is not None:
+var_resid = np.nanvar(dec.resid)
+var_seas = np.nanvar(dec.seasonal)
+props['seasonal_strength'] = float(var_seas / (var_seas + var_resid + 1e-9))
+else:
+props['seasonal_strength'] = 0.0
+return props
+# Function to cluster time series
+def cluster_features(features_df, n_clusters=3):
+X = features_df[['mean','std','acf1','acf5','seasonal_strength']].fillna(0).values
+scaler = StandardScaler()
+Xs = scaler.fit_transform(X)
+k = min(n_clusters, max(2, Xs.shape[0]))
+kmeans = KMeans(n_clusters=k, random_state=42).fit(Xs)
+agg = AgglomerativeClustering(n_clusters=k).fit(Xs)
+features_df['kmeans'] = kmeans.labels_
+features_df['agg'] = agg.labels_
+pca = PCA(n_components=2)
+coords = pca.fit_transform(Xs)
+fig, ax = plt.subplots(figsize=(8,6))
+scatter = ax.scatter(coords[:,0], coords[:,1], c=kmeans.labels_, cmap='tab10')
+for i, txt in enumerate(features_df.index):
+ax.text(coords[i,0], coords[i,1], txt, fontsize=8)
+ax.set_title("PCA of feature vectors (colored by KMeans)")
+plt.colorbar(scatter, ax=ax, label='kmeans cluster')
+plt.tight_layout()
+fname = os.path.join(OUT_DIR, "pca_features.png")
+fig.savefig(fname)
+if PLOT_SHOW: plt.show()
+plt.close(fig)
+return features_df
+# Function to generate synthetic time series based on average cluster properties
+def generate_synthetic_for_cluster(features_df, cluster_label):
+members = features_df[features_df['kmeans']==cluster_label]
+if members.empty: return None
+avg_mean = members['mean'].mean()
+avg_std = members['std'].mean()
+avg_seas = members['seasonal_strength'].mean()
+n = int(members['length'].mean()) if 'length' in members.columns else 200
+t = np.arange(n)
+# Construct synthetic trend, seasonality, and noise
+trend = avg_mean + 0.01 * t
+seasonal = (avg_std * avg_seas) * np.sin(2*np.pi*t/7)
+noise = np.random.normal(0, avg_std*(1-avg_seas)+1e-9, n)
+synth = trend + seasonal + noise
+fig, ax = plt.subplots(figsize=(8,3))
+ax.plot(t, synth, label='synthetic')
+ax.set_title(f"Synthetic series for cluster {cluster_label} (n_members={len(members)})")
+ax.legend()
+plt.tight_layout()
+fname = os.path.join(OUT_DIR, f"synthetic_cluster_{cluster_label}.png")
+fig.savefig(fname)
+if PLOT_SHOW: plt.show()
+plt.close(fig)
+return synth
+# Function to compute and visualize correlations between numeric variables
+def correlation_analysis(df):
+corr = df.corr()
+fig, ax = plt.subplots(figsize=(10,8))
+sns.heatmap(corr, annot=False, cmap='coolwarm', ax=ax)
+ax.set_title("Correlation matrix")
+plt.tight_layout()
+fname = os.path.join(OUT_DIR, "correlation_matrix.png")
+fig.savefig(fname)
+if PLOT_SHOW: plt.show()
+plt.close(fig)
+return corr
+def main():
+df_raw = load_excel(DATA_PATH)
+df = detect_datetime_index(df_raw)
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+if not numeric_cols:
+raise RuntimeError("No numeric columns found for analysis.")
+df = df[numeric_cols].sort_index()
+features = []
+decomps = {}
+for col in df.columns:
+s = df[col]
+print(f"\nAnalyzing series: {col}")
+dec = None
+if s.dropna().shape[0] >= 14:
+dec = decompose_and_plot(s, period=7, title_prefix="")
+decomps[col] = dec
+st = stationarity_tests(s)
+try:
+acf_pacf_plot(s, lags=20)
+except Exception as e:
+print("ACF/PACF plot error:", e)
+feats = extract_features(s)
+feats.update(st)
+z = np.abs(stats.zscore(s.fillna(s.mean())))
+feats['anomalies'] = int((z>3).sum())
+feats['series'] = col
+features.append(feats)
+features_df = pd.DataFrame(features).set_index('series')
+features_df.to_csv(os.path.join(OUT_DIR, "features_table.csv"))
+print("\nFeatures table saved to outputs/features_table.csv")
+features_df = cluster_features(features_df, n_clusters=3)
+features_df.to_csv(os.path.join(OUT_DIR, "features_clusters.csv"))
+print("Clustering results saved.")
+corr = correlation_analysis(df)
+corr.to_csv(os.path.join(OUT_DIR, "correlation_matrix.csv"))
+synth_summ = []
+for cl in sorted(features_df['kmeans'].unique()):
+synth = generate_synthetic_for_cluster(features_df, cl)
+if synth is not None:
+synth_summ.append({'cluster': int(cl), 'synth_mean': float(np.mean(synth)), 'synth_std':
+float(np.std(synth))})
+pd.DataFrame(synth_summ).to_csv(os.path.join(OUT_DIR, "synthetic_summary.csv"))
+print("Synthetic series generated and saved.")
+print("\nAll outputs saved to folder:", OUT_DIR)
+print("Open that folder to collect plots and CSVs for the report.")
+if __name__ == "__main__":
+main()
