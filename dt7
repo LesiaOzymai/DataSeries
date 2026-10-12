@@ -1,0 +1,346 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+from statsmodels.tsa.seasonal import seasonal_decompose
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error,
+r2_score
+import tensorflow as tf
+from tensorflow.keras import layers, models, callbacks
+from tensorflow.keras.utils import plot_model
+import datetime
+import random
+SEED = 42
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+random.seed(SEED)
+RESULTS_DIR = "results"
+os.makedirs(RESULTS_DIR, exist_ok=True)
+# DataGenerator
+class DataGenerator:
+def __init__(self, n_samples=200):
+self.n_samples = n_samples
+self.raw_data = None
+self.cleaned_data = None
+self.anomaly_info = {}
+def generate_synthetic_data(self, noise_level=0.1, anomaly_rate=0.05):
+print("Генерація синтетичних даних...")
+x = np.linspace(0, 10, self.n_samples)
+y_true = 2 + 3 * x - 0.5 * x ** 2 + 5 * np.sin(2 * x)
+noise = np.random.normal(0, noise_level * np.std(y_true),
+self.n_samples)
+y_noisy = y_true + noise
+n_anomalies = int(self.n_samples * anomaly_rate)
+anomaly_indices = np.random.choice(self.n_samples, n_anomalies,
+replace=False)
+y_with_anomalies = y_noisy.copy()
+for idx in anomaly_indices:
+if np.random.choice(['high', 'low']) == 'high':
+y_with_anomalies[idx] += np.random.uniform(3, 8) *
+np.std(y_true)
+else:
+y_with_anomalies[idx] -= np.random.uniform(3, 8) *
+np.std(y_true)
+self.raw_data = pd.DataFrame({
+'time': x, 'value': y_with_anomalies, 'true_value': y_true,
+'is_anomaly': [i in anomaly_indices for i in
+range(self.n_samples)]
+})
+print(f"Згенеровано {self.n_samples} (аномалій: {n_anomalies})")
+return self.raw_data
+def detect_and_remove_anomalies(self, method='zscore', threshold=3.0):
+print(f"\nВиявлення аномалій ({method})...")
+if self.raw_data is None:
+raise ValueError("Завантажте дані!")
+x = self.raw_data['time'].values
+y = self.raw_data['value'].values
+if method == 'zscore':
+anomaly_mask = np.abs(stats.zscore(y)) > threshold
+elif method == 'iqr':
+Q1, Q3 = np.percentile(y, 25), np.percentile(y, 75)
+IQR = Q3 - Q1
+anomaly_mask = (y < Q1 - threshold * IQR) | (y > Q3 +
+threshold * IQR)
+else:
+mad = np.median(np.abs(y - np.median(y)))
+anomaly_mask = np.abs(0.6745 * (y - np.median(y)) / mad) >
+threshold
+self.cleaned_data = pd.DataFrame({'time': x[~anomaly_mask],
+'value': y[~anomaly_mask]})
+self.anomaly_info = {'method': method, 'detected':
+int(np.sum(anomaly_mask)),
+'indices': np.where(anomaly_mask)
+[0].tolist(), 'values': y[anomaly_mask].tolist()}
+print(f"Виявлено: {np.sum(anomaly_mask)}, Очищено:
+{len(self.cleaned_data)}/{len(self.raw_data)}")
+return self.cleaned_data
+# Декомпозиція, побудова датасетів, архітектури, тренування, прогноз
+def decompose_series(df, period=20, model='additive'):
+print("\nДекомпозиція часового ряду...")
+series = pd.Series(df['value'].values, index=pd.RangeIndex(len(df)))
+res = seasonal_decompose(series, model=model, period=period,
+extrapolate_trend='freq')
+# Збережемо графік
+fig = res.plot()
+fig.suptitle('Декомпозиція (trend, seasonal, resid)')
+plt.tight_layout()
+fn = os.path.join(RESULTS_DIR, 'decomposition.png')
+fig.savefig(fn)
+plt.close(fig)
+print(f"Збережено: {fn}")
+return res
+def create_supervised(data, window_size=20, horizon=1):
+"""Перетворює 1D масив у X, y для часових рядів."""
+X, y = [], []
+vals = np.array(data)
+for i in range(len(vals) - window_size - horizon + 1):
+X.append(vals[i:i+window_size])
+y.append(vals[i+window_size+horizon-1])
+X = np.array(X)
+y = np.array(y)
+return X, y
+def build_mlp(input_shape, hidden_units=[64,32], lr=1e-3):
+model = models.Sequential()
+model.add(layers.Input(shape=(input_shape,)))
+for u in hidden_units:
+model.add(layers.Dense(u, activation='relu'))
+model.add(layers.Dropout(0.2))
+model.add(layers.Dense(1, activation='linear'))
+model.compile(optimizer=tf.keras.optimizers.Adam(lr), loss='mse',
+metrics=['mae'])
+return model
+def build_lstm(window_size, n_features=1, lstm_units=64, lr=1e-3):
+model = models.Sequential()
+model.add(layers.Input(shape=(window_size, n_features)))
+model.add(layers.LSTM(lstm_units, return_sequences=False))
+model.add(layers.Dropout(0.2))
+model.add(layers.Dense(1))
+model.compile(optimizer=tf.keras.optimizers.Adam(lr), loss='mse',
+metrics=['mae'])
+return model
+def train_and_evaluate(model, X_train, y_train, X_val, y_val,
+name="model", epochs=200, batch_size=16):
+ckpt = callbacks.ModelCheckpoint(os.path.join(RESULTS_DIR, f"{name}
+_best.keras"),
+save_best_only=True,
+monitor='val_loss')
+es = callbacks.EarlyStopping(monitor='val_loss', patience=20,
+restore_best_weights=True)
+hist = model.fit(X_train, y_train, validation_data=(X_val,y_val),
+epochs=epochs, batch_size=batch_size,
+callbacks=[ckpt, es], verbose=0)
+pd.DataFrame(hist.history).to_csv(os.path.join(RESULTS_DIR, f"{name}
+_history.csv"), index=False)
+print(f"Навчання {name} завершено. Останній val_loss:
+{hist.history['val_loss'][-1]:.4f}")
+return model, hist
+def forecast_iterative(model, last_window, scaler=None, n_steps=50,
+model_type='mlp'):
+preds = []
+window = last_window.copy()
+for _ in range(n_steps):
+if model_type == 'mlp':
+x_in = window.reshape(1, -1)
+pred = model.predict(x_in, verbose=0)[0,0]
+preds.append(pred)
+window = np.roll(window, -1)
+window[-1] = pred
+else: # 'lstm'
+x_in = window.reshape(1, window.shape[0], 1)
+pred = model.predict(x_in, verbose=0)[0,0]
+preds.append(pred)
+window = np.roll(window, -1)
+window[-1] = pred
+if scaler is not None:
+preds =
+scaler.inverse_transform(np.array(preds).reshape(-1,1)).reshape(-1)
+return np.array(preds)
+def evaluate_predictions(y_true, y_pred):
+mae = mean_absolute_error(y_true, y_pred)
+mse = mean_squared_error(y_true, y_pred)
+rmse = np.sqrt(mse)
+r2 = r2_score(y_true, y_pred)
+return {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
+def plot_results(df, train_idx, val_idx, test_idx, preds_train, preds_val,
+preds_test, future_preds, name_suffix=""):
+plt.figure(figsize=(12,6))
+plt.plot(df['time'], df['value'], label='observed', marker='.',
+linewidth=1)
+# training predictions align
+if preds_train is not None:
+t = df['time'].values[train_idx]
+plt.plot(t, preds_train, label='pred_train', linewidth=2)
+if preds_val is not None:
+t = df['time'].values[val_idx]
+plt.plot(t, preds_val, label='pred_val', linewidth=2)
+if preds_test is not None:
+t = df['time'].values[test_idx]
+plt.plot(t, preds_test, label='pred_test', linewidth=2)
+if future_preds is not None:
+last_time = df['time'].values[-1]
+step = df['time'].values[1] - df['time'].values[0]
+future_times = last_time + step * np.arange(1, len(future_preds)
++1)
+plt.plot(future_times, future_preds,
+label='forecast_out_of_sample', linestyle='--'
+, linewidth=2)
+plt.legend()
+plt.title('Observed vs Predictions ' + name_suffix)
+plt.xlabel('time')
+plt.ylabel('value')
+fn = os.path.join(RESULTS_DIR, f"results_plot{name_suffix}.png")
+plt.savefig(fn)
+plt.close()
+print(f"Збережено графік: {fn}")
+# Основний pipeline
+def main():
+# 1) Генерація даних
+gen = DataGenerator(n_samples=300)
+raw = gen.generate_synthetic_data(noise_level=0.12, anomaly_rate=0.05)
+raw.to_csv(os.path.join(RESULTS_DIR, "raw_data.csv"), index=False)
+# 2) Детекція аномалій та очищення
+cleaned = gen.detect_and_remove_anomalies(method='zscore',
+threshold=3.0)
+cleaned.to_csv(os.path.join(RESULTS_DIR, "cleaned_data.csv"),
+index=False)
+# 3) Декомпозиція
+res = decompose_series(cleaned, period=30, model='additive')
+# 4) Маштабування/скейлінг
+scaler = MinMaxScaler()
+values = cleaned['value'].values.reshape(-1,1)
+values_scaled = scaler.fit_transform(values).reshape(-1)
+# 5) Підготовка sup. dataset
+WINDOW = 30
+HORIZON = 1
+X, y = create_supervised(values_scaled, window_size=WINDOW,
+horizon=HORIZON)
+print(f"\nФорми X,y: {X.shape}, {y.shape}")
+# 6) Розбивка на train/val/test
+n = len(X)
+n_train = int(n*0.7)
+n_val = int(n*0.15)
+n_test = n - n_train - n_val
+X_train, y_train = X[:n_train], y[:n_train]
+X_val, y_val = X[n_train:n_train+n_val], y[n_train:n_train+n_val]
+X_test, y_test = X[n_train+n_val:], y[n_train+n_val:]
+# 7) Побудова та тренування MLP
+mlp = build_mlp(input_shape=WINDOW, hidden_units=[128,64], lr=1e-3)
+print("\nMLP summary:")
+mlp.summary()
+# reshape для mlp (плоский)
+X_train_mlp = X_train.copy()
+X_val_mlp = X_val.copy()
+X_test_mlp = X_test.copy()
+mlp, hist_mlp = train_and_evaluate(mlp, X_train_mlp, y_train,
+X_val_mlp, y_val,
+name="mlp_model", epochs=300,
+batch_size=16)
+# 8) Побудова та тренування LSTM (використовується 3D вхід)
+lstm = build_lstm(window_size=WINDOW, n_features=1, lstm_units=64,
+lr=1e-3)
+print("\nLSTM summary:")
+lstm.summary()
+X_train_lstm = X_train.reshape((X_train.shape[0], X_train.shape[1],
+1))
+X_val_lstm = X_val.reshape((X_val.shape[0], X_val.shape[1], 1))
+X_test_lstm = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
+lstm, hist_lstm = train_and_evaluate(lstm, X_train_lstm, y_train,
+X_val_lstm, y_val,
+name="lstm_model", epochs=300,
+batch_size=16)
+# 9) Оцінка на train/val/test (в інверсованому масштаі)
+# MLP preds
+preds_train_mlp = mlp.predict(X_train_mlp).reshape(-1,1)
+preds_val_mlp = mlp.predict(X_val_mlp).reshape(-1,1)
+preds_test_mlp = mlp.predict(X_test_mlp).reshape(-1,1)
+# inverse transform
+preds_train_mlp_inv =
+scaler.inverse_transform(preds_train_mlp).reshape(-1)
+preds_val_mlp_inv =
+scaler.inverse_transform(preds_val_mlp).reshape(-1)
+preds_test_mlp_inv =
+scaler.inverse_transform(preds_test_mlp).reshape(-1)
+y_train_inv =
+scaler.inverse_transform(y_train.reshape(-1,1)).reshape(-1)
+y_val_inv = scaler.inverse_transform(y_val.reshape(-1,1)).reshape(-1)
+y_test_inv =
+scaler.inverse_transform(y_test.reshape(-1,1)).reshape(-1)
+# LSTM preds
+preds_train_lstm = lstm.predict(X_train_lstm).reshape(-1,1)
+preds_val_lstm = lstm.predict(X_val_lstm).reshape(-1,1)
+preds_test_lstm = lstm.predict(X_test_lstm).reshape(-1,1)
+preds_train_lstm_inv =
+scaler.inverse_transform(preds_train_lstm).reshape(-1)
+preds_val_lstm_inv =
+scaler.inverse_transform(preds_val_lstm).reshape(-1)
+preds_test_lstm_inv =
+scaler.inverse_transform(preds_test_lstm).reshape(-1)
+# 10) Метрики
+metrics = {}
+metrics['MLP_train'] = evaluate_predictions(y_train_inv,
+preds_train_mlp_inv)
+metrics['MLP_val'] = evaluate_predictions(y_val_inv,
+preds_val_mlp_inv)
+metrics['MLP_test'] = evaluate_predictions(y_test_inv,
+preds_test_mlp_inv)
+metrics['LSTM_train'] = evaluate_predictions(y_train_inv,
+preds_train_lstm_inv)
+metrics['LSTM_val'] = evaluate_predictions(y_val_inv,
+preds_val_lstm_inv)
+metrics['LSTM_test'] = evaluate_predictions(y_test_inv,
+preds_test_lstm_inv)
+# Збережено таблицю метрик
+metrics_df = pd.DataFrame({k:pd.Series(v) for k,v in metrics.items()})
+metrics_df.to_csv(os.path.join(RESULTS_DIR, 'metrics_table.csv'))
+print("\nМетрики (збережено в results/metrics_table.csv):")
+print(metrics_df)
+# 11) Прогноз поза межами інтервалу (екстраполяція)
+N_FUTURE = 60
+last_window_scaled = values_scaled[-WINDOW:] # останнє вікно з кінця
+очищеного ряду
+future_mlp_scaled = forecast_iterative(mlp, last_window_scaled.copy(),
+scaler=None,
+n_steps=N_FUTURE,
+model_type='mlp')
+future_lstm_scaled = forecast_iterative(lstm,
+last_window_scaled.copy(), scaler=None,
+n_steps=N_FUTURE,
+model_type='lstm')
+future_mlp =
+scaler.inverse_transform(future_mlp_scaled.reshape(-1,1)).reshape(-1)
+future_lstm =
+scaler.inverse_transform(future_lstm_scaled.reshape(-1,1)).reshape(-1)
+# 12) Збереження та візуалізація результатів
+total_len = len(values_scaled)
+train_idx = np.arange(WINDOW, WINDOW + len(X_train))
+val_idx = np.arange(WINDOW + len(X_train), WINDOW + len(X_train) +
+len(X_val))
+test_idx = np.arange(WINDOW + len(X_train) + len(X_val), WINDOW +
+len(X_train) + len(X_val) + len(X_test))
+# Побудуємо графіки для MLP
+plot_results(cleaned.reset_index(drop=True), train_idx, val_idx,
+test_idx,
+preds_train_mlp_inv, preds_val_mlp_inv,
+preds_test_mlp_inv, future_mlp, name_suffix="_MLP")
+# Побудуємо графіки для LSTM
+plot_results(cleaned.reset_index(drop=True), train_idx, val_idx,
+test_idx,
+preds_train_lstm_inv, preds_val_lstm_inv,
+preds_test_lstm_inv, future_lstm, name_suffix="_LSTM")
+# 13) Збереження метрик
+metrics_df.to_csv(os.path.join(RESULTS_DIR,
+"model_metrics_summary.csv"))
+print("\nГотово. Результати збережено в папці 'results'.")
+# 14) Архітектури: зберегти графічно (якщо доступно)
+try:
+plot_model(mlp, to_file=os.path.join(RESULTS_DIR,"mlp_arch.png"),
+show_shapes=True)
+plot_model(lstm,
+to_file=os.path.join(RESULTS_DIR,"lstm_arch.png"), show_shapes=True)
+print("Збережено архітектуру моделей (png).")
+except Exception as e:
+print("Створюємо summary")
+if __name__ == "__main__":
+main()
