@@ -1,0 +1,175 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_squared_error, mean_absolute_error,
+mean_absolute_percentage_error
+import warnings
+warnings.filterwarnings('ignore')
+# Генерація та очищення даних
+class DataGenerator:
+def __init__(self, n_samples=200):
+self.n_samples = n_samples
+self.raw_data = None
+self.cleaned_data = None
+def generate_data(self, noise_level=0.1, anomaly_rate=0.05):
+print("Генерація синтетичних даних...")
+x = np.linspace(0, 10, self.n_samples)
+y_true = 2 + 3 * x - 0.5 * x ** 2 + 5 * np.sin(2 * x)
+noise = np.random.normal(0, noise_level * np.std(y_true), self.n_samples)
+y_noisy = y_true + noise
+# Додавання аномалій
+n_anomalies = int(self.n_samples * anomaly_rate)
+anomaly_indices = np.random.choice(self.n_samples, n_anomalies, replace=False)
+y_with_anomalies = y_noisy.copy()
+y_with_anomalies[anomaly_indices] += np.random.uniform(-8, 8, n_anomalies)
+self.raw_data = pd.DataFrame({'time': x, 'value': y_with_anomalies, 'true_value': y_true})
+print(f"Згенеровано {self.n_samples} записів (аномалій: {n_anomalies})")
+return self.raw_data
+def detect_and_remove_anomalies(self, threshold=3.0):
+print("\nВиявлення аномалій методом Z-score...")
+y = self.raw_data['value'].values
+anomaly_mask = np.abs(stats.zscore(y)) > threshold
+self.cleaned_data = self.raw_data[~anomaly_mask].reset_index(drop=True)
+print(f"Видалено: {np.sum(anomaly_mask)} аномалій, залишилось:
+{len(self.cleaned_data)} записів")
+return self.cleaned_data
+# Аналіз і моделювання часових рядів
+class TimeSeriesAnalyzer:
+def __init__(self, series):
+self.series = series
+self.best_params = None
+self.model_fit = None
+def check_stationarity(self):
+#ADF тест стаціонарності
+print("\nАНАЛІЗ СТАЦІОНАРНОСТІ")
+adf_test = adfuller(self.series)
+print(f"ADF Statistic: {adf_test[0]:.4f}")
+print(f"p-value: {adf_test[1]:.4f}")
+print(f"Стаціонарний: {'Так' if adf_test[1] <= 0.05 else 'Ні'}")
+plt.figure(figsize=(10, 5))
+plt.plot(self.series, label='Оригінальний ряд')
+plt.title('Часовий ряд')
+plt.legend()
+plt.grid(True)
+plt.show()
+return {'is_stationary': adf_test[1] <= 0.05}
+def moving_average_smoothing(self, window=5):
+#Реалізація Moving Average (MA)
+print(f"\nKОВЗНЕ СЕРЕДНЄ")
+ma_series = self.series.rolling(window=window).mean()
+plt.figure(figsize=(10, 5))
+plt.plot(self.series, label='Оригінальний ряд'
+, alpha=0.6)
+plt.plot(ma_series, label=f'MA', color='red')
+plt.title('Згладжування часових даних методом Moving Average')
+plt.legend()
+plt.grid(True)
+plt.show()
+return ma_series
+def find_best_arima_parameters(self, max_p=3, max_d=2, max_q=3):
+#Підбір параметрів ARIMA
+print("\nПІДБІР ПАРАМЕТРІВ ARIMA")
+best_bic = np.inf
+best_params = (0, 0, 0)
+best_model = None
+for p in range(max_p + 1):
+for d in range(max_d + 1):
+for q in range(max_q + 1):
+try:
+model = ARIMA(self.series, order=(p, d, q))
+model_fit = model.fit()
+bic = model_fit.bic
+if bic < best_bic:
+best_bic = bic
+best_params = (p, d, q)
+best_model = model_fit
+except:
+continue
+print(f"Найкраща модель: ARIMA{best_params}, BIC={best_bic:.2f}")
+self.best_params = best_params
+self.model_fit = best_model
+return best_params
+def evaluate_model(self, train_ratio=0.8):
+#Оцінка якості ARIMA
+print(f"\nНАВЧАННЯ ТА ОЦІНКА ARIMA{self.best_params}")
+train_size = int(len(self.series) * train_ratio)
+train, test = self.series.iloc[:train_size], self.series.iloc[train_size:]
+model = ARIMA(train, order=self.best_params)
+model_fit = model.fit()
+predictions = model_fit.forecast(steps=len(test))
+mse = mean_squared_error(test, predictions)
+rmse = np.sqrt(mse)
+mae = mean_absolute_error(test, predictions)
+mape = mean_absolute_percentage_error(test, predictions)
+print(f"MSE: {mse:.4f}")
+print(f"RMSE: {rmse:.4f}")
+print(f"MAE: {mae:.4f}")
+print(f"MAPE: {mape:.4%}")
+plt.figure(figsize=(12, 6))
+plt.plot(train.index, train, label='Тренувальні дані'
+, color='blue')
+plt.plot(test.index, test, label='Тестові дані'
+, color='green')
+plt.plot(test.index, predictions, label='Прогноз ARIMA', color='red', linestyle='--')
+plt.title(f'ARIMA{self.best_params} - прогнозування часових даних')
+plt.legend()
+plt.grid(True)
+plt.show()
+return {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'MAPE': mape}
+def forecast_extrapolation(self, intervals=[0.5, 1.0, 1.5, 2.0]):
+#Екстраполяція на різні інтервали
+print("\nЕКСТРАПОЛЯЦІЯ НА РІЗНІ ІНТЕРВАЛИ")
+model = ARIMA(self.series, order=self.best_params)
+model_fit = model.fit()
+n_obs = len(self.series)
+for interval in intervals:
+steps = int(n_obs * interval)
+forecast = model_fit.get_forecast(steps=steps)
+mean_forecast = forecast.predicted_mean
+conf_int = forecast.conf_int(alpha=0.05)
+plt.figure(figsize=(12, 6))
+plt.plot(self.series, label='Історичні дані'
+, color='blue')
+forecast_index = pd.date_range(
+start=self.series.index[-1] + pd.Timedelta(days=1),
+periods=steps,
+freq='D'
+)
+plt.plot(forecast_index, mean_forecast, label=f'Прогноз ({interval} інтервал)',
+color='red')
+plt.fill_between(forecast_index, conf_int.iloc[:, 0], conf_int.iloc[:, 1], color='red',
+alpha=0.2)
+plt.title(f'Екстраполяція ARIMA{self.best_params} на {interval} інтервал')
+plt.legend()
+plt.grid(True)
+plt.show()
+def main():
+print("АНАЛІЗ ТА ПРОГНОЗУВАННЯ ЧАСОВИХ РЯДІВ (ARIMA + MA)")
+print("=" * 60)
+# Генерація та очищення даних
+data_gen = DataGenerator(n_samples=200)
+raw_df = data_gen.generate_data(noise_level=0.2, anomaly_rate=0.07)
+cleaned_df = data_gen.detect_and_remove_anomalies()
+cleaned_df.index = pd.date_range(start="2024-01-01", periods=len(cleaned_df), freq='D')
+series = cleaned_df['value']
+analyzer = TimeSeriesAnalyzer(series)
+stationarity = analyzer.check_stationarity()
+analyzer.moving_average_smoothing(window=7)
+best_params = analyzer.find_best_arima_parameters()
+metrics = analyzer.evaluate_model()
+analyzer.forecast_extrapolation()
+#Висновки
+print("=" * 60)
+print("ВИСНОВКИ:")
+print(f"1. Обрана модель: ARIMA{best_params}")
+print(f"2. Стаціонарність: {'Так' if stationarity['is_stationary'] else 'Ні'}")
+print(f"3. Якість прогнозу (RMSE): {metrics['RMSE']:.4f}")
+print(f"4. Модель реалізує і ARIMA, і Moving Average (MA)")
+print(f"5. Екстраполяція виконана на 0.5–2 інтервали з 95% довірчими межами")
+print(f"6. Модель придатна для аналізу та прогнозування часових даних.")
+if __name__ == "__main__":
+main()
